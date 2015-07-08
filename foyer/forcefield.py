@@ -9,7 +9,7 @@ from foyer.orderedset import OrderedSet
 from foyer.atomtyper import find_atomtypes
 
 
-def apply_forcefield(intermol_system, forcefield, debug=True):
+def apply_forcefield(intermol_system, forcefield, debug=True, nrexcl=4):
     """Apply a forcefield to a Topology. """
     if forcefield.lower() in ['opls-aa', 'oplsaa', 'opls']:
         ff = Forcefield('oplsaa')
@@ -22,10 +22,25 @@ def apply_forcefield(intermol_system, forcefield, debug=True):
     find_atomtypes(atoms, forcefield, debug=debug)
     ff.resolve_bondingtypes(bondgraph)
     propogate_atomtyping(intermol_system)
-    enumerate_forcefield_terms(intermol_system, bondgraph, ff)
-    import ipdb; ipdb.set_trace()
-    intermol_system.gen_pairs(n_excl=4)
-    ff = ff.prune()
+    # print(ff.defines)
+    enumerate_forcefield_terms(intermol_system, bondgraph, ff, n_excl=nrexcl)
+    update_intermol_system_defaults(ff, intermol_system)
+
+    # import ipdb; ipdb.set_trace()
+    # intermol_system.gen_pairs(n_excl=4)
+    # ff = ff.prune()
+
+
+def update_intermol_system_defaults(forcefield, intermol_system):
+    """Updates the system defaults. """
+    intermol_system.nonbonded_function = forcefield.system.nonbonded_function
+    intermol_system.combination_rule = forcefield.system.combination_rule
+    intermol_system.genpairs = forcefield.system.genpairs
+    intermol_system.lj_correction = forcefield.system.lj_correction
+    intermol_system.coulomb_correction = forcefield.system.coulomb_correction
+    for atom in intermol_system.atoms:
+        key = atom.atomtype[0]
+        intermol_system.atomtypes[key] = forcefield.atomtypes[key]
 
 
 def propogate_atomtyping(intermol_system):
@@ -69,9 +84,26 @@ def prepare_atoms(intermol_system):
 
 
 def enumerate_forcefield_terms(intermol_system, bondgraph, forcefield, angles=True,
-                               dihedrals=False, impropers=False):
+                               dihedrals=True, impropers=True, n_excl=4):
     """Convert Bonds to ForcefieldBonds and find angles and dihedrals. """
     create_bonds(intermol_system, forcefield)
+
+    if impropers:
+        for key in forcefield.defines:
+            if key[0:8] == 'improper':
+                name = key.replace('Z', 'X')
+                name = name.replace('Y', 'X')
+                n_atoms_specified = 4
+                btypes = name.split('_')[1:]
+                line = btypes + ['1'] + forcefield.defines[key].split()
+                line = ' '.join(line)
+                improper_type = forcefield.process_forcetype(btypes, 'ProperPeriodicDihedralType',
+                                                       line, n_atoms_specified,
+                                                       forcefield.gromacs_dihedral_types,
+                                                       forcefield.canonical_dihedral)
+                improper_type.improper = True
+                key = tuple(btypes + [improper_type.improper])
+                forcefield.add_improper_types(key, improper_type)
 
     if any([angles, dihedrals, impropers]):
         for node_1 in bondgraph.nodes_iter():
@@ -86,12 +118,14 @@ def enumerate_forcefield_terms(intermol_system, bondgraph, forcefield, angles=Tr
                             if len(neighbors_2) > 1:
                                 create_dihedrals(intermol_system, forcefield, node_1, neighbors_1, node_2, neighbors_2)
                 if impropers and len(neighbors_1) >= 3:
-                    create_impropers(intermol_system, node_1, neighbors_1)
+                    create_impropers(intermol_system, node_1, neighbors_1, forcefield)
+            node_1[1].nrexcl = n_excl
+            if intermol_system.genpairs == 'yes' and n_excl < 4:
+                create_pairs(bondgraph, node_1, neighbors_1, n_excl=n_excl)
 
 
 def create_bonds(intermol_system, forcefield):
     """Convert from tuples of (Atom1, Atom2) to ForcefieldBonds. """
-
     for mol_type in intermol_system.molecule_types.values():
         for molecule in mol_type.molecules:
             for bond in mol_type.bonds:
@@ -106,7 +140,7 @@ def create_bonds(intermol_system, forcefield):
                         bondtype = forcefield.bondtypes[bondingtypes[::-1]]
                     except KeyError:
                         raise ValueError('No bondtype exists for bondingtypes {0}'.format(bondingtypes))
-                bond.bondtype = bondtype
+                bond.forcetype = bondtype #was bond.bondtype?
             break  # Only loop through one of the molecules.
 
 
@@ -129,7 +163,7 @@ def create_angles(intermol_system, forcefield, node, neighbors):
             except KeyError:
                 raise ValueError('No angletype exists for bondingtypes {0}'.format(bondingtypes))
         angle = Angle(atom1.index, atom2.index, atom3.index)
-        angle.angletype = angletype
+        angle.forcetype = angletype #.angletype
 
         intermol_system.angletypes[bondingtypes] = angletype
         mol_type.angles.add(angle)
@@ -151,34 +185,100 @@ def create_dihedrals(intermol_system, forcefield, node_1, neighbors_1, node_2, n
         if pair[0] != pair[1]:
             atom1 = pair[0]
             atom4 = pair[1]
-            bondingtypes = tuple([atom1.bondingtype, atom2.bondingtype, atom3.bondingtype, atom4.bondingtype])
+            # skip 'SI' 'OS' dihedrals, temp fix for betacristobalite
+            if atom1.bondingtype and atom2.bondingtype in ['SI', 'OS']:
+                continue
+            # add False at end of bonding types
+            bondingtypes = [tuple([atom1.bondingtype, atom2.bondingtype, atom3.bondingtype, atom4.bondingtype, False])]
+            bondingtypes.append(tuple([atom4.bondingtype, atom3.bondingtype, atom2.bondingtype, atom1.bondingtype, False]))
+            bondingtypes.append(tuple([atom1.bondingtype, atom2.bondingtype, atom3.bondingtype, 'X', False]))
+            bondingtypes.append(tuple([atom4.bondingtype, atom3.bondingtype, atom2.bondingtype, 'X', False]))
+            bondingtypes.append(tuple(['X', atom2.bondingtype, atom3.bondingtype, 'X', False]))
+            bondingtypes.append(tuple(['X', atom3.bondingtype, atom2.bondingtype, 'X', False]))
             # TODO: Hide lookup logic.
-            try:
-                dihedraltype = forcefield.dihedraltypes[bondingtypes]
-            except KeyError:
+            dihedraltype = None
+            for bondingtype in bondingtypes:
                 try:
-                    dihedraltype = forcefield.dihedraltypes[bondingtypes[::-1]]
+                    dihedraltype = forcefield.dihedraltypes[bondingtype]
+                    break
                 except KeyError:
-                    warnings.warn('No dihedraltype exists for bondingtypes {0}'.format(bondingtypes))
                     continue
+            if dihedraltype is None:
+                warnings.warn('No dihedraltype exists for bondingtypes {0}'.format(bondingtypes[0]))
+                continue
             dihedral = Dihedral(atom1.index, atom2.index, atom3.index, atom4.index)
-            dihedral.dihedraltype = dihedraltype
-
-            import pdb; pdb.set_trace()
-            intermol_system.dihedraltypes[bondingtypes] = dihedraltype
+            # dihedral.dihedraltype = dihedraltype
+            dihedral.forcetype = list(dihedraltype)[0]
+            intermol_system.dihedraltypes[bondingtypes[0]] = dihedraltype
             mol_type.dihedrals.add(dihedral)
 
 
-def create_impropers(topology, node, neighbors):
+def create_impropers(intermol_system, node_1, neighbors_1, forcefield):
     """Find all impropers around a node. """
-    for triplet in itertools.combinations(neighbors, 3):
-        atoms = sort_atoms_alphabetically([node, triplet[2]])
-        if atoms[0] == node:
-            topology.add_ff_improper(ForcefieldImproper(
-                node, triplet[0], triplet[1], triplet[2]))
-        elif atoms[1] == node:
-            topology.add_ff_improper(ForcefieldImproper(
-                triplet[2], triplet[1], triplet[0], node))
+    mol_type = node_1[1]
+    for triplet in itertools.combinations(neighbors_1, 3):
+        atom1 = node_1[0]
+        atom2 = triplet[0][0]
+        atom3 = triplet[1][0]
+        atom4 = triplet[2][0]
+        bondingtypes = [tuple([atom1.bondingtype, atom2.bondingtype, atom3.bondingtype, atom4.bondingtype])]
+        bondingtypes.append(tuple(['X', atom1.bondingtype, 'X', 'X', True]))
+        bondingtypes.append(tuple([atom2.bondingtype, atom1.bondingtype, 'X', 'X', True]))
+        bondingtypes.append(tuple([atom3.bondingtype, atom1.bondingtype, 'X', 'X', True]))
+        bondingtypes.append(tuple([atom4.bondingtype, atom1.bondingtype, 'X', 'X', True]))
+        bondingtypes.append(tuple([atom2.bondingtype, 'X', atom3.bondingtype, atom4.bondingtype, True]))
+        impropertype = None
+        for bondingtype in bondingtypes:
+            try:
+                impropertype = forcefield.impropertypes[bondingtype]
+                break
+            except KeyError:
+                continue
+        if impropertype is None:
+            warnings.warn('No improper dihedraltype exists for bondingtypes {0}'.format(bondingtypes[0]))
+            continue
+        dihedral = Dihedral(atom1.index, atom2.index, atom3.index, atom4.index)
+        dihedral.forcetype = impropertype
+
+        intermol_system.dihedraltypes[bondingtypes[0]] = impropertype
+        mol_type.dihedrals.add(dihedral)
+
+
+def create_pairs(bondgraph, node_1, neighbors_1, n_excl=3):
+    """Find all pairs for a node. """
+    atom1 = node_1[0]
+    mol_type = node_1[1]
+    for node_2 in neighbors_1:
+        atom2 = node_2[0]
+        neighbors_2 = bondgraph.neighbors(node_2)
+        if len(neighbors_2) > 1:
+            for node_3 in neighbors_2:
+                if node_3[0] != atom1:
+                    atom3 = node_3[0]
+                    neighbors_3 = bondgraph.neighbors(node_3)
+                    if len(neighbors_3) > 1:
+                        for node_4 in neighbors_3:
+                            if node_4[0] != atom2:
+                                atom4 = node_4[0]
+                                if node_4[0].index > node_1[0].index:
+                                    if n_excl <= 3:
+                                        gen_pair((atom1, atom4), mol_type)
+                    if node_3[0].index > node_1[0].index:
+                        if n_excl <= 2:
+                            gen_pair((atom1, atom3), mol_type)
+        if node_2[0].index > node_1[0].index:
+            if n_excl <= 1:
+                gen_pair((atom1, atom2), mol_type)
+
+
+def gen_pair(pair, mol_type):
+    non_existing_pair = True
+    for mol_pair in mol_type.pair_forces:
+        if pair[0].index == mol_pair.atom1 and pair[1].index == mol_pair.atom2:
+            non_existing_pair = False
+    if non_existing_pair:
+        lj_pair = LjCPair(pair[0].index, pair[1].index)
+        mol_type.pair_forces.add(lj_pair)
 
 
 class Forcefield(GromacsParser):
@@ -201,6 +301,7 @@ class Forcefield(GromacsParser):
         self.bondtypes = self.system.bondtypes
         self.angletypes = self.system.angletypes
         self.dihedraltypes = self.system.dihedraltypes
+        self.impropertypes = dict()
         self.implicittypes = dict()
         self.pairtypes = dict()
         self.cmaptypes = dict()
@@ -212,14 +313,74 @@ class Forcefield(GromacsParser):
 
     def resolve_bondingtypes(self, bondgraph):
         """ """
+        from simtk.unit import elementary_charge, atom_mass_units, nanometer, kilojoules, mole, radian, degree
+
         for atom, _ in bondgraph.nodes():
+            # Temporary solution: For Adding missing Forcefield Elements
             if atom.atomtype[0] not in self.atomtypes:
-                print("Could not find atomtype: '{0}' in forcefield.".format(atom.atomtype[0]))
+                self.bondtypes[('SI', 'CT')] = HarmonicBondType(bondingtype1='SI', bondingtype2='CT', c=False, length=.1850*nanometer, k=167360*kilojoules/(nanometer**2*mole))
+                self.angletypes[('SI', 'CT', 'CT')] = HarmonicAngleType(bondingtype1='SI', bondingtype2='CT', bondingtype3='CT', k=254.97296*kilojoules/(mole*radian**2), theta=120*degree)
+                self.angletypes[('SI', 'CT', 'HC')] = HarmonicAngleType(bondingtype1='SI', bondingtype2='CT', bondingtype3='HC', k=418.4*kilojoules/(mole*radian**2), theta=109.5*degree)
+                self.angletypes[('OH', 'SI', 'CT')] = HarmonicAngleType(bondingtype1='OH', bondingtype2='SI', bondingtype3='CT', k=502.18*kilojoules/(mole*radian**2), theta=100*degree)
+                self.angletypes[('OH', 'SI', 'OH')] = HarmonicAngleType(bondingtype1='OH', bondingtype2='SI', bondingtype3='OH', k=502.18*kilojoules/(mole*radian**2), theta=110*degree)
+                self.angletypes[('OS', 'SI', 'CT')] = HarmonicAngleType(bondingtype1='OS', bondingtype2='SI', bondingtype3='CT', k=502.18*kilojoules/(mole*radian**2), theta=100*degree)
+                if atom.atomtype[0] in ['opls_1155']:
+                    atom.bondingtype = 'HO'
+                    atom.charge = (0, 0.215*elementary_charge)
+                    atom.mass = (0, 1.00800*atom_mass_units)
+                    new_atom_type = AtomSigepsType(atom.atomtype[0], atom.bondingtype, 1, atom.mass[0], atom.charge[0], 'A', 0*nanometer, 0*kilojoules/mole)
+                    self.system.add_atomtype(new_atom_type)
+                elif atom.atomtype[0] in ['opls_1154']:
+                    atom.bondingtype = 'OH'
+                    atom.charge = (0, -0.645*elementary_charge)
+                    atom.mass = (0, 15.99940*atom_mass_units)
+                    new_atom_type = AtomSigepsType(atom.atomtype[0], atom.bondingtype, 1, atom.mass[0], atom.charge[0], 'A', .312*nanometer, .71128*kilojoules/mole)
+                    self.system.add_atomtype(new_atom_type)
+                elif atom.atomtype[0] in ['opls_1156']:
+                    atom.bondingtype = 'OS'
+                    atom.charge = (0, -0.645*elementary_charge)
+                    atom.mass = (0, 15.99940*atom_mass_units)
+                    new_atom_type = AtomSigepsType(atom.atomtype[0], atom.bondingtype, 1, atom.mass[0], atom.charge[0], 'A', .312*nanometer, .71128*kilojoules/mole)
+                    self.system.add_atomtype(new_atom_type)
+                elif atom.atomtype[0] in ['opls_1000', 'opls_1002']:
+                    atom.bondingtype = 'SI'
+                    atom.charge = (0, .860*elementary_charge)
+                    atom.mass = (0, 28.08550*atom_mass_units)
+                    new_atom_type = AtomSigepsType(atomtype=atom.atomtype[0], bondtype=atom.bondingtype, atomic_number=14, mass=atom.mass[0], charge=atom.charge[0], ptype='A', sigma=.400*nanometer, epsilon=.4184*kilojoules/mole)
+                    self.system.add_atomtype(new_atom_type)
+                elif atom.atomtype[0] in ['opls_1004']:
+                    atom.bondingtype = 'SI'
+                    atom.charge = (0, .745*elementary_charge)
+                    atom.mass = (0, 28.08550*atom_mass_units)
+                    new_atom_type = AtomSigepsType(atomtype=atom.atomtype[0], bondtype=atom.bondingtype, atomic_number=14, mass=atom.mass[0], charge=atom.charge[0], ptype='A', sigma=.400*nanometer, epsilon=.4184*kilojoules/mole)
+                    self.system.add_atomtype(new_atom_type)
+                elif atom.atomtype[0] in ['opls_1005']:
+                    atom.bondingtype = 'CT'
+                    atom.charge = (0, -.120*elementary_charge)
+                    atom.mass = (0, 12.01100*atom_mass_units)
+                    new_atom_type = AtomSigepsType(atom.atomtype[0], atom.bondingtype, 6, atom.mass[0], atom.charge[0], 'A', .350*nanometer, .276144*kilojoules/mole)
+                    self.system.add_atomtype(new_atom_type)
+                elif atom.atomtype[0] in ['opls_1001']:
+                    atom.bondingtype = 'OS'
+                    atom.charge = (0, -.430*elementary_charge)
+                    atom.mass = (0, 15.99940*atom_mass_units)
+                    new_atom_type = AtomSigepsType(atom.atomtype[0], atom.bondingtype, 8, atom.mass[0], atom.charge[0], 'A', .300*nanometer, .711280*kilojoules/mole)
+                    self.system.add_atomtype(new_atom_type)
+                # End Temp Solution!
+                else:
+                    print("Could not find atomtype: '{0}' in forcefield.".format(atom.atomtype[0]))
             else:
                 atom.bondingtype = self.atomtypes[atom.atomtype[0]].bondtype
                 if not hasattr(atom, 'charge') or not atom.charge:
                     atom.charge = (0, self.atomtypes[atom.atomtype[0]].charge)
+                if not hasattr(atom, 'mass') or not atom.mass:
+                    atom.mass = (0, self.atomtypes[atom.atomtype[0]].mass)
 
+
+
+    def add_improper_types(self, key, improper_type):
+        """Create a list of Improper_types"""
+        self.impropertypes[key] = improper_type
     # def find_atom_types(self, bondtype):
     #     """If the id is the atom type, return the AtomType object. """
     #     matching_atom_types = []

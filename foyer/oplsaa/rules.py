@@ -669,6 +669,105 @@ def opls_1001(atom):
     return True
 
 
+
+@Element('Si')
+@NeighborCount(4)
+@NeighborsExactly('O', 4)
+@Whitelist(1002)
+def opls_1002(atom):
+    """OMCTS Si fudged"""
+    return True
+
+@Element('Si')
+@NeighborCount(3)
+@NeighborsExactly('O', 3)
+@Whitelist(1002)
+def opls_1003(atom):
+    """OMCTS Si fudged"""
+    return True
+
+@Element('Si')
+@NeighborCount(2)
+@NeighborsExactly('O', 2)
+@Whitelist(1002)
+def opls_1006(atom):
+    """OMCTS Si fudged"""
+    return True
+
+@Element('Si')
+@NeighborCount(1)
+@NeighborsExactly('O', 1)
+@Whitelist(1002)
+def opls_1007(atom):
+    """OMCTS Si fudged"""
+    return True
+
+@Element('O')
+@NeighborCount(1)
+@NeighborsExactly('Si', 1)
+@Whitelist(1001)
+def opls_1008(atom):
+    """OMCTS O fudged"""
+    return True
+
+@Element('Si')
+@NeighborCount(4)
+@NeighborsExactly('C', 1)
+@NeighborsExactly('O', 3)
+@Whitelist(1004)
+def opls_1004(atom):
+    """OMCTS Si fudged"""
+    return True
+
+@Element('C')
+@NeighborCount(4)
+@NeighborsExactly('C', 1)
+@NeighborsExactly('Si', 1)
+@NeighborsExactly('H', 2)
+@Whitelist(1005)
+def opls_1005(atom):
+    """OMCTS C fudged"""
+    return True
+
+@Element('O')
+@NeighborCount(2)
+@NeighborsExactly('Si', 1)
+@NeighborsExactly('H', 1)
+@Whitelist(1154)
+@Blacklist(154)
+def opls_1011(atom):
+    rule_ids = [1002]
+    check = check_atom(atom.neighbors[0], rule_ids)
+    if not check:
+        check = check_atom(atom.neighbors[1], rule_ids)
+    return check
+
+@Element('O')
+@NeighborCount(2)
+@NeighborsExactly('Si', 2)
+@Whitelist(1156)
+@Blacklist(1001)
+def opls_1009(atom):
+    rule_ids = [1004]
+    check = check_atom(atom.neighbors[0], rule_ids)
+    if not check:
+        check = check_atom(atom.neighbors[1], rule_ids)
+    return check
+
+@Element('H')
+@NeighborCount(1)
+@NeighborsExactly('O', 1)
+@Whitelist(1155)
+@Blacklist(155)
+def opls_1010(atom):
+    rule_ids = [1002]
+    check = check_atom(atom.neighbors[0].neighbors[0], rule_ids)
+    if not check:
+        check = check_atom(atom.neighbors[0].neighbors[1], rule_ids)
+    return check
+#
+#  Christoph said, remove because they do not belong here
+
 def get_opls_fn(name):
     """Get the full path to a file used to validate the OPLS-aa atomtyper.
 
