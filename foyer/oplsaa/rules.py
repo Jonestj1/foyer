@@ -765,6 +765,17 @@ def opls_1010(atom):
     if not check:
         check = check_atom(atom.neighbors[0].neighbors[1], rule_ids)
     return check
+
+### Peg monomer C
+@Element('C')
+@NeighborCount(4)
+@NeighborsExactly('H', 2)
+@NeighborsExactly('O', 1)
+@NeighborsExactly('C', 1)
+@Whitelist(182)
+def opls_182(atom):
+    """C(H2OR): ethyl ether """
+    return True
 #
 #  Christoph said, remove because they do not belong here
 
